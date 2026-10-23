@@ -147,6 +147,7 @@ textarea{resize:vertical;min-height:62px}
           <span class="hint">Video: MP4, MOV, WebM · Photo: JPG, PNG, WebP · the result is always a video reel</span>
           <input type="file" id="file" accept="video/*,image/*" class="sr">
         </label>
+        <p class="status" id="mstatus" role="status"></p>
       </div>
       <div class="group">
         <h3>Format</h3>
@@ -456,10 +457,22 @@ function loadFile(f){
     return;
   }
   {
-    const v = document.createElement("video"); v.muted = true; v.playsInline = true; v.preload = "auto"; v.src = url; v.crossOrigin = "anonymous";
-    v.addEventListener("loadeddata", () => { setSource(v,"video",v.videoWidth,v.videoHeight,f.name); }, {once:true});
-    v.addEventListener("seeked", () => { dirty = true; });
-    v.addEventListener("error", () => status(`This video could not be opened. Try an MP4 (H.264) file.`, "err"), {once:true});
+    status("Opening video…");
+    const v = document.createElement("video");
+    v.muted = true; v.defaultMuted = true; v.playsInline = true; v.setAttribute("playsinline",""); v.setAttribute("muted",""); v.preload = "auto";
+    v.style.cssText = "position:fixed;left:-10px;top:-10px;width:2px;height:2px;opacity:0;pointer-events:none";
+    document.body.appendChild(v);
+    let ready = false;
+    const fail = (why) => { if(ready) return; ready = true; v.remove(); URL.revokeObjectURL(url);
+      status(why || "This video could not be opened in this browser. iPhone videos are often HEVC (H.265): open the page in Safari, or convert the clip to MP4 (H.264).", "err"); };
+    const go = () => { if(ready || !v.videoWidth) return; ready = true; clearTimeout(timer);
+      document.querySelectorAll("video[data-hfs]").forEach(o => { if(o !== v){ o.pause(); o.remove(); } }); v.dataset.hfs = "1";
+      setSource(v,"video",v.videoWidth,v.videoHeight,f.name); status(""); };
+    v.addEventListener("loadedmetadata", () => { v.play().then(() => { v.pause(); v.currentTime = 0; }).catch(() => {}); });
+    ["loadeddata","canplay","seeked","playing"].forEach(ev => v.addEventListener(ev, () => { go(); dirty = true; }));
+    v.addEventListener("error", () => fail());
+    const timer = setTimeout(() => { if(!ready){ if(v.videoWidth) go(); else fail(); } }, 12000);
+    v.src = url; v.load();
   }
 }
 const slug = s => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,60) || "clip";
@@ -847,7 +860,7 @@ const MIMES = ["video/mp4;codecs=avc1.640028","video/mp4;codecs=avc1.4d0028","vi
 const pickMime = () => (window.MediaRecorder && MIMES.find(m => { try{ return MediaRecorder.isTypeSupported(m); }catch(e){ return false; } })) || "";
 const MIME = pickMime();
 $("#specFmt").textContent = !MIME ? "not supported" : MIME.startsWith("video/mp4") ? (MIME.includes("avc1") ? "MP4 · H.264" : "MP4") : "WebM";
-function status(msg, kind=""){ const s = $("#status"); s.textContent = msg; s.className = "status " + kind; }
+function status(msg, kind=""){ ["#status","#mstatus"].forEach(id => { const s = $(id); if(s){ s.textContent = msg; s.className = "status " + kind; } }); }
 function fname(ext, suffix=""){ return (slug($("#fname").value) || "hike-finder") + suffix + "." + ext; }
 async function save(name, blob){
   if(!downloads) throw {code:"unavailable", message:"Saving is not available in this view."};
@@ -880,12 +893,17 @@ $("#expVideo").addEventListener("click", async () => {
     rec.start(250);
     const t0 = performance.now();
     if(v) await v.play();
+    const L = v ? Math.max(.5, Math.min(S.len, (v.duration || S.len) - S.start)) : S.len;
     await new Promise(resolve => {
+      let finished = false; const finish = () => { if(!finished){ finished = true; resolve(); } };
+      if(v) v.addEventListener("ended", finish, {once:true});
+      setTimeout(finish, (L + 3)*1000);
       const step = () => {
+        if(finished) return;
         const el = v ? v.currentTime - S.start : (performance.now()-t0)/1000;
-        const p = Math.min(1, el/S.len); prog.style.width = (p*100).toFixed(1)+"%";
+        const p = Math.min(1, el/L); prog.style.width = (p*100).toFixed(1)+"%";
         compose({clean:true, zoomMul: !v && S.kenburns ? 1 + .08*p : 1, p});
-        if(p >= 1 || (v && v.ended)) return resolve();
+        if(p >= 1 || (v && v.ended)) return finish();
         (v && v.requestVideoFrameCallback) ? v.requestVideoFrameCallback(step) : requestAnimationFrame(step);
       };
       step();
@@ -895,7 +913,7 @@ $("#expVideo").addEventListener("click", async () => {
     stream.getTracks().forEach(t => { if(t.kind==="video") t.stop(); });
     const ext = MIME.startsWith("video/mp4") ? "mp4" : "webm";
     const blob = new Blob(chunks, {type: MIME.split(";")[0]});
-    $("#expInfo").innerHTML = `<dt>File</dt><dd>${fname(ext)}</dd><dt>Size</dt><dd>${S.W}×${S.H} · ${S.len.toFixed(1)} s</dd><dt>Format</dt><dd>${$("#specFmt").textContent} · ${(blob.size/1048576).toFixed(1)} MB</dd>`;
+    $("#expInfo").innerHTML = `<dt>File</dt><dd>${fname(ext)}</dd><dt>Size</dt><dd>${S.W}×${S.H} · ${L.toFixed(1)} s</dd><dt>Format</dt><dd>${$("#specFmt").textContent} · ${(blob.size/1048576).toFixed(1)} MB</dd>`;
     status(window.claude ? "Rendered. Confirm the save." : "Rendered. The file is downloading.");
     try{ await save(fname(ext), blob); status(ext==="mp4" ? "Reel saved." : "Reel saved as WebM. Instagram accepts MP4 best; Chrome or Safari record MP4.", "ok"); }
     catch(e){ status(explain(e), e.code==="declined" ? "" : "err"); }
