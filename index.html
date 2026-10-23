@@ -121,7 +121,7 @@ textarea{resize:vertical;min-height:62px}
     <div class="frame" id="frame" style="--ar:.5625;--arw:9;--arh:16">
       <canvas id="out" width="1080" height="1920" aria-label="Edited frame"></canvas>
       <canvas id="overlay"></canvas>
-      <div class="badge" id="badge">Sample frame · drop a video to start</div>
+      <div class="badge" id="badge">Sample frame · drop a video or photo to start</div>
     </div>
     <div class="transport">
       <button class="btn small" id="playBtn" type="button">Play</button>
@@ -143,9 +143,9 @@ textarea{resize:vertical;min-height:62px}
     <div class="pane" data-pane="media">
       <div class="group">
         <label class="drop" id="drop" for="file">
-          <strong>Drop a video clip</strong>
-          <span class="hint">MP4, MOV or WebM · stays in your browser</span>
-          <input type="file" id="file" accept="video/*" class="sr">
+          <strong>Drop a video or photo</strong>
+          <span class="hint">Video: MP4, MOV, WebM · Photo: JPG, PNG, WebP · the result is always a video reel</span>
+          <input type="file" id="file" accept="video/*,image/*" class="sr">
         </label>
       </div>
       <div class="group">
@@ -168,8 +168,11 @@ textarea{resize:vertical;min-height:62px}
       </div>
       <div class="group">
         <h3>Crop</h3>
-        <div class="slider"><label for="zoom">Zoom</label><input type="range" id="zoom" min="100" max="300" value="100"><output for="zoom">100%</output></div>
-        <p class="hint">Drag the preview to reposition. The image is never stretched; it is cropped to fill the frame.</p>
+        <div class="slider"><label for="zoom">Zoom</label><input type="range" id="zoom" min="30" max="300" value="100"><output for="zoom">100%</output></div>
+        <div class="slider"><label for="posX">Left ↔ right</label><input type="range" id="posX" min="-100" max="100" value="0"><output for="posX">0</output></div>
+        <div class="slider"><label for="posY">Up ↕ down</label><input type="range" id="posY" min="-100" max="100" value="0"><output for="posY">0</output></div>
+        <div class="row"><button class="btn small" id="resetPos" type="button">Centre &amp; reset zoom</button></div>
+        <p class="hint">Drag the preview with your finger or mouse to choose the best part of the shot. Below 100% zoom, “Fit + blur” fills the rest of the frame.</p>
       </div>
       <div class="group" id="lenGroup">
         <h3>Length</h3>
@@ -181,6 +184,7 @@ textarea{resize:vertical;min-height:62px}
           <button type="button" data-len="15" aria-pressed="false">15 s</button>
         </div>
         <div class="slider" id="startRow" hidden><label for="start">Start at</label><input type="range" id="start" min="0" max="0" step="0.1" value="0"><output for="start">0.0 s</output></div>
+        <label class="check" id="kbRow" hidden><input type="checkbox" id="kenburns" checked> Slow zoom-in (photos)</label>
         <label class="check" id="audioRow" hidden><input type="checkbox" id="keepAudio"> Keep the clip's original sound</label>
       </div>
     </div>
@@ -269,7 +273,7 @@ const store = {
 };
 
 const S = {
-  fit:"crop", aspect:"9:16", W:1080, H:1920, zoom:1, panX:0, panY:0, len:8, start:0, kenburns:false, keepAudio:false,
+  fit:"crop", aspect:"9:16", W:1080, H:1920, zoom:1, panX:0, panY:0, len:8, start:0, kenburns:true, keepAudio:false,
   g:zeroG(), look:"Natural", lutKey:"", lutMix:1,
   masks:[], sel:-1, showMask:true,
   text:{on:false, hook:"This lake looks like it's floating", style:"clean", pos:"top", size:70, pinOn:false, pin:"Vágar, Faroe Islands"},
@@ -418,10 +422,11 @@ function setSource(el, kind, w, h, name){
   S.zoom = 1; S.panX = 0; S.panY = 0; $("#zoom").value = 100; setOut($("#zoom"),"100%");
   uploadSource();
   const isV = kind==="video";
-  $("#startRow").hidden = !isV; $("#audioRow").hidden = !isV;
-  if(isV) setFit(w > h ? "panR" : "crop");
+  $("#startRow").hidden = !isV; $("#audioRow").hidden = !isV; $("#kbRow").hidden = isV || name==="sample";
+syncPos();
+  if(name!=="sample") setFit(isV && w > h ? "panR" : "crop");
   if(isV){ const st = $("#start"); st.max = Math.max(0, el.duration - S.len).toFixed(1); st.value = 0; S.start = 0; setOut(st,"0.0 s"); }
-  $("#badge").textContent = name==="sample" ? "Sample frame · drop a video to start" : (isV ? `Video · ${w}×${h} · ${el.duration.toFixed(1)} s` : `Photo · ${w}×${h}`);
+  $("#badge").textContent = name==="sample" ? "Sample frame · drop a video or photo to start" : (isV ? `Video · ${w}×${h} · ${el.duration.toFixed(1)} s` : `Photo · ${w}×${h}`);
   const base = name==="sample" ? $("#fname").value : slug(name.replace(/\.[^.]+$/,""));
   if(name!=="sample") $("#fname").value = new Date().toISOString().slice(0,10)+"_"+base;
   S.playing = false; $("#playBtn").textContent = "Play";
@@ -437,7 +442,19 @@ function uploadSource(){
 function loadFile(f){
   if(!f) return;
   const url = URL.createObjectURL(f);
-  if(!f.type.startsWith("video")){ URL.revokeObjectURL(url); status("Only video files are supported here. Use MP4, MOV or WebM.", "err"); activeTabSet("export"); return; }
+  if(!f.type.startsWith("video")){
+    const img = new Image();
+    img.onload = () => {
+      const max = Math.min(gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096, 6000);
+      let el = img, w = img.naturalWidth, h = img.naturalHeight;
+      if(Math.max(w,h) > max){ const k = max/Math.max(w,h); const c = document.createElement("canvas"); c.width = Math.round(w*k); c.height = Math.round(h*k); c.getContext("2d").drawImage(img,0,0,c.width,c.height); el = c; w = c.width; h = c.height; }
+      el.dataset.url = url;
+      setSource(el,"image",w,h,f.name);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); status(/hei[cf]/i.test(f.name + f.type) ? "This browser cannot open HEIC photos. Export the photo as JPG (on iPhone: Settings → Camera → Formats → Most Compatible), or open this page in Safari." : "This photo could not be opened. Use JPG, PNG or WebP.", "err"); activeTabSet("export"); };
+    img.src = url;
+    return;
+  }
   {
     const v = document.createElement("video"); v.muted = true; v.playsInline = true; v.preload = "auto"; v.src = url; v.crossOrigin = "anonymous";
     v.addEventListener("loadeddata", () => { setSource(v,"video",v.videoWidth,v.videoHeight,f.name); }, {once:true});
@@ -451,10 +468,10 @@ const slug = s => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replac
 function cropRect(zoomMul, panX = S.panX, panY = S.panY, zoom = S.zoom){
   const sa = media.w/media.h, ta = S.W/S.H; let sx = 1, sy = 1;
   if(sa > ta) sx = ta/sa; else sy = sa/ta;
-  const z = zoom*(zoomMul||1); sx /= z; sy /= z;
+  const z = Math.max(1, zoom)*(zoomMul||1); sx /= z; sy /= z;
   return [(1-sx)*(panX*.5+.5), (1-sy)*(panY*.5+.5), sx, sy];
 }
-function progress(){ if(media.kind!=="video" || !media.el) return 0; return Math.max(0, Math.min(1, (media.el.currentTime - S.start)/S.len)); }
+function progress(){ if(media.kind==="image") return S.playing ? kbT/S.len : 0; if(!media.el) return 0; return Math.max(0, Math.min(1, (media.el.currentTime - S.start)/S.len)); }
 function renderGL(opts={}){
   if(!gl || !media.el) return;
   if(glc.width !== S.W || glc.height !== S.H){ glc.width = S.W; glc.height = S.H; }
@@ -606,9 +623,14 @@ drop.addEventListener("drop", e => loadFile(e.dataTransfer.files[0]));
 document.addEventListener("dragover", e => e.preventDefault()); document.addEventListener("drop", e => { e.preventDefault(); if(e.target.closest && !e.target.closest("#drop")) loadFile(e.dataTransfer.files[0]); });
 seg("#aspectSeg","ar", ar => { S.aspect = ar; [S.W,S.H] = ASPECTS[ar]; const [a,b] = ar.split(":"); const f = $("#frame"); f.style.setProperty("--arw",a); f.style.setProperty("--arh",b); f.style.setProperty("--ar", a/b); resetBrushes(); updateSpec(); });
 const FIT_HINTS = {crop:"Crop cuts a vertical slice; drag the preview to choose which part.", fit:"Shows the whole horizontal shot with a blurred copy behind it. Drag to move it up or down.", panR:"The frame glides across the shot from left to right over the clip length.", panL:"The frame glides across the shot from right to left over the clip length."};
-seg("#fitSeg","fit", f => { S.fit = f; S.panX = 0; $("#fitHint").textContent = FIT_HINTS[f]; });
+seg("#fitSeg","fit", f => { S.fit = f; S.panX = 0; syncPos(); $("#fitHint").textContent = FIT_HINTS[f]; });
 function setFit(f){ $$("#fitSeg button").forEach(b => b.setAttribute("aria-pressed", b.dataset.fit===f)); S.fit = f; $("#fitHint").textContent = FIT_HINTS[f]; }
-$("#zoom").addEventListener("input", e => { S.zoom = e.target.value/100; setOut(e.target, e.target.value+"%"); dirty = true; });
+function syncPos(){ const x = $("#posX"), y = $("#posY"); x.value = Math.round(S.panX*100); y.value = Math.round(S.panY*100); setOut(x, x.value); setOut(y, y.value); }
+$("#posX").addEventListener("input", e => { S.panX = e.target.value/100; setOut(e.target, e.target.value); dirty = true; });
+$("#posY").addEventListener("input", e => { S.panY = e.target.value/100; setOut(e.target, e.target.value); dirty = true; });
+$("#resetPos").addEventListener("click", () => { S.panX = 0; S.panY = 0; S.zoom = 1; $("#zoom").value = 100; setOut($("#zoom"),"100%"); syncPos(); dirty = true; });
+$("#kenburns").addEventListener("change", e => { S.kenburns = e.target.checked; dirty = true; });
+$("#zoom").addEventListener("input", e => { S.zoom = e.target.value/100; if(S.zoom < 1 && S.fit!=="fit") setFit("fit"); setOut(e.target, e.target.value+"%"); dirty = true; });
 seg("#lenSeg","len", l => { S.len = +l; if(media.kind==="video"){ const st = $("#start"); st.max = Math.max(0, media.el.duration - S.len).toFixed(1); if(S.start > +st.max){ S.start = +st.max; st.value = S.start; setOut(st, S.start.toFixed(1)+" s"); } } updateSpec(); });
 $("#start").addEventListener("input", e => { S.start = +e.target.value; setOut(e.target, S.start.toFixed(1)+" s"); if(media.kind==="video"){ media.el.currentTime = S.start; } dirty = true; });
 $("#keepAudio").addEventListener("change", e => S.keepAudio = e.target.checked);
@@ -800,7 +822,7 @@ frameEl.addEventListener("pointermove", e => {
   }
   pointer.last = [x,y]; dirty = true;
 });
-["pointerup","pointercancel"].forEach(t => frameEl.addEventListener(t, () => { pointer.down = false; if(pointer.mode==="linear"){ const m = S.masks[S.sel]; if(m && m.y1 < m.y0){ const a = m.y0; m.y0 = m.y1; m.y1 = a; } if(activeTab==="masks") buildMaskUI(); } else if(pointer.mode==="radial" && activeTab==="masks") buildMaskUI(); }));
+["pointerup","pointercancel"].forEach(t => frameEl.addEventListener(t, () => { pointer.down = false; if(pointer.mode==="pan") syncPos(); if(pointer.mode==="linear"){ const m = S.masks[S.sel]; if(m && m.y1 < m.y0){ const a = m.y0; m.y0 = m.y1; m.y1 = a; } if(activeTab==="masks") buildMaskUI(); } else if(pointer.mode==="radial" && activeTab==="masks") buildMaskUI(); }));
 frameEl.addEventListener("pointerleave", () => { pointer.inside = false; });
 function paint(m, x0, y0, x1, y1){
   const c = brushCanvases[S.sel], x = c.getContext("2d");
@@ -839,7 +861,7 @@ let audioGraph = null;
 $("#expVideo").addEventListener("click", async () => {
   if(!MIME){ status("This browser cannot record video. Use current Chrome, Edge or Safari.", "err"); return; }
   if(S.exporting) return;
-  if(media.kind!=="video"){ status("Drop a video first. The sample frame is only a preview.", "err"); return; }
+  if(media.name==="sample"){ status("Drop a video or photo first. The sample frame is only a preview.", "err"); return; }
   S.exporting = true; const btn = $("#expVideo"); btn.disabled = true; btn.textContent = "Rendering…"; status("Rendering. Keep this tab in front.");
   const prog = $("#prog"); prog.style.width = "0";
   const wasPlaying = S.playing; S.playing = false; $("#playBtn").textContent = "Play";
